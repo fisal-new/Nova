@@ -501,3 +501,17 @@ the DEVICE report the truth instead of guessing from here:
   the whole UI to a dead root.
 - Welcome `.card` backgrounds are transparent glass now (was: solid fill).
 - Release APK v0.8.3 arm64, 16MB, signed. Tests green (38 + 4 + tsc).
+
+---
+
+# Round 19 — auto permission request + GitHub publish (v0.8.4)
+
+- StorageBanner now requests access ITSELF on first launch (legacy dialog
+  or all-files settings automatically), and re-verifies when the user
+  comes back from system settings (visibility/focus listeners) — grant
+  success jumps straight into shared storage.
+- No extra runtime permissions exist to request: storage is the only one
+  with a feature behind it. Documented instead of adding fake ones.
+- Published to GitHub: github.com/fisal-new/Nova (SSH deploy key,
+  host key verified against GitHub's published fingerprint).
+- Release APK v0.8.4 arm64, 16MB, signed.
