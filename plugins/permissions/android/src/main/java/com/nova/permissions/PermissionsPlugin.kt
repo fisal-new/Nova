@@ -75,7 +75,8 @@ class PermissionsPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     private fun hasLegacyStorage(): Boolean {
-        if (Build.VERSION.SDK_INT >= 30) return true
+        // Real check on every SDK level (no early-true shortcut): on 30+ the
+        // answer is informational only — MANAGE_EXTERNAL_STORAGE governs.
         val r = ContextCompat.checkSelfPermission(activity, Manifest.permission.READ_EXTERNAL_STORAGE)
         val w = ContextCompat.checkSelfPermission(activity, Manifest.permission.WRITE_EXTERNAL_STORAGE)
         return r == PackageManager.PERMISSION_GRANTED && w == PackageManager.PERMISSION_GRANTED

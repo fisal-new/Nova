@@ -139,7 +139,7 @@ export default function SettingsPanel() {
           type="password"
           value={s.openrouterKey}
           onChange={(e) => set({ openrouterKey: e.target.value.trim() })}
-          placeholder="sk-or-v1-… (empty = use embedded/proxy)"
+          placeholder="sk-or-v1-… (your own key, or set a proxy below)"
           spellCheck={false}
           style={{
             background: "var(--bg-1)",

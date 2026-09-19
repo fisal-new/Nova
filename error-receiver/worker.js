@@ -33,6 +33,9 @@ export default {
     if (url.pathname !== "/report" || req.method !== "POST") {
       return new Response("nova error receiver: POST /report", { status: 404 });
     }
+    // Declared up front: this file is an ES module (strict mode), so
+    // assigning to an undeclared variable would throw ReferenceError.
+    let report = null;
     // Active by default: forged reports cost quota and can mention-spam
     // Discord, so requests without the shared secret are rejected whenever
     // the worker owner configured one (header first, JSON field fallback).

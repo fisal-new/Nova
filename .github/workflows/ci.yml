@@ -16,6 +16,11 @@ jobs:
       - run: npm run check
       - run: npm test
       - run: npm run build
+      - name: worker syntax (Cloudflare files must parse)
+        run: |
+          node --check ai-proxy/worker.js
+          node --check error-receiver/worker.js
+          test "$(grep -c 'let report' error-receiver/worker.js)" -ge 1
 
   backend:
     runs-on: ubuntu-latest

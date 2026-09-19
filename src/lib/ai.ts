@@ -8,35 +8,14 @@ export function normalizeBase(u: string): string {
 }
 
 /**
- * Fallback shared key, deliberately scattered: slows casual grep/skimming
- * only. Anyone with the APK/source can still reassemble it in minutes —
- * real secrecy requires the proxy (see ai-proxy/worker.js). This exists
- * so the app works out-of-the-box; rotate it if it ever leaks publicly.
- * Resolution order: user key (Settings) → proxy (no key needed) → this.
+ * No bundled key, ever: a shared secret inside a shipped APK/source repo
+ * is public by definition (this exact mistake burned a real key before).
+ * Resolution: explicit user key (Settings) → proxy endpoint (holds the
+ * key server-side, needs no client key at all) → "" (UI nudges to Settings).
  */
-const K_PARTS = [
-  "sk-or-v1-32ab",
-  "c8316a3fd17a",
-  "a5c8031ea540",
-  "aae73b704d4e",
-  "b32cc8347766",
-  "2b878726708c",
-];
-
-export function embeddedKey(): string {
-  try {
-    return K_PARTS.join("");
-  } catch {
-    return "";
-  }
-}
-
-/** Final key choice: explicit user key wins, then embedded fallback. */
 export function resolveApiKey(userKey: string): string {
   const u = (userKey || "").trim();
-  if (u.length > 10) return u;
-  const e = embeddedKey();
-  return e.length > 10 ? e : "";
+  return u.length > 10 ? u : "";
 }
 
 export interface FreeModel {

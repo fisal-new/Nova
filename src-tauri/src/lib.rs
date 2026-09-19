@@ -334,6 +334,23 @@ fn run_command(
 ) -> Result<String, String> {
     // No program/arg filtering (user decision, v0.7.0): this device is
     // trusted-local. Only the 120s watchdog + error translation remain.
+    //
+    // Output goes to a temp FILE, not pipes: a chatty process (>64KB, e.g.
+    // long npm installs) would otherwise fill the pipe buffer and hang
+    // forever, misreported as a timeout. Same fix as start_android_build.
+    static OUT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let out_path = std::env::temp_dir().join(format!(
+        "nova-run-{}-{}.log",
+        std::process::id(),
+        OUT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let out_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&out_path)
+        .map_err(io_err)?;
+    let err_file = out_file.try_clone().map_err(io_err)?;
     let mut child = Command::new(&program)
         .args(&args)
         .current_dir(if cwd.is_empty() { "." } else { &cwd })
@@ -342,41 +359,51 @@ fn run_command(
         } else {
             Stdio::null()
         })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::from(out_file))
+        .stderr(Stdio::from(err_file))
         .spawn()
         .map_err(|e| spawn_err(&program, e))?;
-    if let Some(input) = stdin_data {
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(input.as_bytes());
-        }
-    }
+    // stdin writer runs on its own thread: writing the full input while the
+    // child also streams output can no longer deadlock either side.
+    let mut stdin_handle = child.stdin.take();
     // Wait with a timeout so hung servers/infinite loops can't run forever.
     // std-only: poll the child, kill on expiry.
     let timeout = Duration::from_secs(120);
     let step = Duration::from_millis(100);
     let mut waited = Duration::ZERO;
-    loop {
-        match child.try_wait().map_err(|e| e.to_string())? {
-            Some(_) => break,
-            None => {
-                if waited >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Ok("(timed out after 120s — process killed)".to_string());
+    let mut timed_out = false;
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            if let Some(input) = stdin_data {
+                if let Some(mut stdin) = stdin_handle.take() {
+                    let _ = stdin.write_all(input.as_bytes());
                 }
-                std::thread::sleep(step);
-                waited += step;
+            }
+        });
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    if waited >= timeout {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        timed_out = true;
+                        break;
+                    }
+                    std::thread::sleep(step);
+                    waited += step;
+                }
+                Err(_) => break,
             }
         }
+    });
+    let mut s = std::fs::read_to_string(&out_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&out_path);
+    if timed_out {
+        s.push_str("\n(timed out after 120s — process killed)");
     }
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-
-    let mut s = String::new();
-    s.push_str(&String::from_utf8_lossy(&out.stdout));
-    s.push_str(&String::from_utf8_lossy(&out.stderr));
     if s.trim().is_empty() {
-        s = format!("(exit {})", out.status);
+        s = "(command produced no output)".to_string();
     }
     // git over the terminal can't do interactive auth: say so plainly instead
     // of leaving the user staring at a bare timeout.
@@ -598,18 +625,21 @@ fn analyze_file(path: String, content: Option<String>) -> Result<Vec<Diagnostic>
     let mut diags = vec![];
     for (i, line) in text.lines().enumerate().take(5000) {
         let ln = i + 1;
-        if line.len() > 200 {
+        // character count, not bytes: Arabic/CJK text is 2-4 bytes per char
+        let len = line.chars().count();
+        if len > 200 {
             diags.push(Diagnostic {
                 line: ln,
                 col: 201,
                 severity: "warning".into(),
-                message: format!("Line too long ({} chars)", line.len()),
+                message: format!("Line too long ({} chars)", len),
             });
         }
-        if line.trim_end().len() != line.len() {
+        let trimmed_len = line.trim_end().chars().count();
+        if trimmed_len != len {
             diags.push(Diagnostic {
                 line: ln,
-                col: line.trim_end().len() + 1,
+                col: trimmed_len + 1,
                 severity: "info".into(),
                 message: "Trailing whitespace".into(),
             });
@@ -957,8 +987,7 @@ mod tests {
     }
 
     #[test]
-    fn read_refuses_big_files_before_loading() {
-        let root = std::env::temp_dir().join("nova-sizecheck-test");
+    fn read_refuses_big_files_before_loading() {        let root = std::env::temp_dir().join("nova-sizecheck-test");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         // 3MB of zeroes: must be refused by metadata, not loaded
@@ -974,10 +1003,28 @@ mod tests {
     }
 
     #[test]
-    fn skip_dirs_cover_heavy_trees() {        for d in ["node_modules", "target", "dist", ".git", "__pycache__", ".venv"] {
+    fn skip_dirs_cover_heavy_trees() {
+        for d in ["node_modules", "target", "dist", ".git", "__pycache__", ".venv"] {
             assert!(skip_dir_name(d), "{}", d);
         }
         assert!(!skip_dir_name("src"));
         assert!(!skip_dir_name(".github"));
+    }
+
+    #[test]
+    fn big_output_does_not_hang_or_time_out() {
+        // ~109KB of output would fill a 64KB pipe and deadlock the old code;
+        // file-backed output must stream it through, cap at 20KB, and report
+        // success (the tail number 20000 is correctly cut by the cap).
+        let out = run_command(
+            String::new(),
+            "sh".into(),
+            vec!["-c".into(), "seq 1 20000".into()],
+            None,
+        )
+        .expect("run_command failed");
+        assert!(out.contains("\n1000\n"), "early output missing");
+        assert!(out.contains("… truncated"), "cap marker missing");
+        assert!(!out.contains("timed out"), "falsely reported as timeout");
     }
 }

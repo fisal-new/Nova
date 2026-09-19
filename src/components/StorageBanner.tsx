@@ -2,6 +2,7 @@ import { FolderOpen, ShieldCheck, Stethoscope } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
   checkStorage,
+  checkStorageStrict,
   openAllFilesSettings,
   requestLegacyStorage,
   storageReady,
@@ -94,21 +95,39 @@ export default function StorageBanner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Ground-truth self test ON THIS DEVICE: permission state, listing,
-  // and a real write+delete round-trip in the current folder.
+  // Ground-truth self test ON THIS DEVICE: plugin reachability first
+  // (distinguishes "Kotlin bridge dead" from "permission denied"), then
+  // permission state, listing, and a real write+delete round-trip.
   const runDiagnosis = async () => {
     setTesting(true);
     const out: { label: string; ok: boolean; detail: string }[] = [];
     try {
-      const s = await checkStorage();
+      const s = await checkStorageStrict();
       setSt(s);
       out.push({
-        label: "Permission state",
-        ok: s.sdk === 0 || storageReady(s),
-        detail: s.sdk === 0 ? "desktop/web — no runtime gate" : `sdk=${s.sdk} legacy=${s.legacyGranted} allFiles=${s.allFilesGranted} root=${s.externalRoot || "?"}`,
+        label: "Kotlin bridge",
+        ok: true,
+        detail: `plugin answered (sdk=${s.sdk})`,
       });
     } catch (e) {
-      out.push({ label: "Permission state", ok: false, detail: String(e).slice(0, 160) });
+      out.push({
+        label: "Kotlin bridge",
+        ok: false,
+        detail: `UNREACHABLE: ${String(e).slice(0, 200)}`,
+      });
+      setDiag(out);
+      setTesting(false);
+      return;
+    }
+    // checkStorageStrict already refreshed state above — reuse it
+    {
+      const s2 = await checkStorage();
+      setSt(s2);
+      out.push({
+        label: "Permission state",
+        ok: s2.sdk === 0 || storageReady(s2),
+        detail: s2.sdk === 0 ? "desktop/web — no runtime gate" : `sdk=${s2.sdk} legacy=${s2.legacyGranted} allFiles=${s2.allFilesGranted} root=${s2.externalRoot || "?"}`,
+      });
     }
     try {
       const listing = await apiListDir(rootPath);

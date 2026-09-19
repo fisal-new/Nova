@@ -515,3 +515,47 @@ the DEVICE report the truth instead of guessing from here:
 - Published to GitHub: github.com/fisal-new/Nova (SSH deploy key,
   host key verified against GitHub's published fingerprint).
 - Release APK v0.8.4 arm64, 16MB, signed.
+
+---
+
+# Round 20 — Kotlin NOT deleted + ProGuard keep + bridge diagnosis (v0.8.5)
+
+Owner feared Kotlin was deleted and permissions never fire. Verified:
+`plugins/permissions` intact, wired in Cargo.toml + `run()` +
+capabilities, and `com/nova/permissions/PermissionsPlugin` present in
+shipped classes.dex (re-verified in v0.8.5 artifact).
+- Added explicit R8 keep rules (app `proguard-rules.pro` + plugin
+  `consumer-rules.pro`): the class is reached only via reflection
+  (`register_android_plugin` → JNI `find_class`), which R8 cannot see —
+  without keeps, any toolchain update could silently strip it while the
+  code looks perfect.
+- New `checkStorageStrict()` + diagnosis step 0 "Kotlin bridge": tells
+  UNREACHABLE (with raw error) apart from "desktop/no-gate", so the
+  device itself reports whether the bridge answers.
+- Tests: `cargo test` 4/4, `npm test` 38/38, `tsc` + `vite build` green.
+  Release APK v0.8.5 arm64, 16MB, signed.
+
+---
+
+# Round 21 — review fixes applied + verified (v0.8.6, source-only release)
+
+- **K_PARTS deleted.** No bundled OpenRouter key anywhere; resolution is
+  user key → proxy → nudge. (Owner: rotate the burned key regardless —
+  old zips/APKs/chat logs still contain it.)
+- **mobile.rs reads the REAL `{opened}`/`{requested}`** from Kotlin
+  instead of mapping every success to `true`. ROMs that drop the intent
+  now surface honestly in the UI.
+- **error-receiver `let report` added** — the strict-mode ReferenceError
+  that made every valid report answer "bad json" is gone (both workers
+  also pass `node --check` in CI now).
+- **run_command deadlock fixed**: stdout/stderr stream to a temp file
+  (no 64KB pipe to fill), stdin writer on a scoped thread, same 120s
+  watchdog. Proven by a unit test pushing ~109KB through (`seq 1 20000`
+  completes, capped, no false timeout).
+- Kept by owner decision (documented, not hidden): autoApprove default
+  ON, no delete-tool but `rm` reachable via shell, CSP `https:` for
+  custom proxies.
+- Polish: `analyze_file` counts characters not bytes (Arabic text no
+  longer flagged 2-4x too early); `hasLegacyStorage` does the real check
+  on all SDK levels; CI checks both workers.
+- Tests: `cargo test` 5/5, `npm test` 38/38, `tsc` + `vite build` green.

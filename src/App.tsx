@@ -159,7 +159,7 @@ export default function App() {
         <div className="brand">
           <span className="brand-mark">⚡</span>
           Nova IDE
-          <small>v0.8.4</small>
+          <small>v0.8.6</small>
         </div>
         <div className="omnibox" onClick={() => setPalette(true)}>
           <Search size={14} />

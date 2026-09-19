@@ -1,4 +1,4 @@
-# ⚡ Nova IDE — v0.8.4
+# ⚡ Nova IDE — v0.8.6
 
 Mobile-first IDE built with **Tauri v2 + Rust + React + Monaco Editor**.
 Same editor engine as VS Code, with a native Rust backend for files,

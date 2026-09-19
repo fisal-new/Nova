@@ -711,7 +711,7 @@ export const useAI = create<AIState>((set, get) => ({
     set({ modelsLoading: true });
     const ideSettings = useIDE.getState().settings;
     const base = normalizeBase(ideSettings.aiEndpoint || "");
-    // models list is public; embedded fallback keeps refresh working keyless
+    // models list is public; refresh works keyless (auth header omitted)
     const listKey = resolveApiKey(ideSettings.openrouterKey);
     const pickDefault = (list: FreeModel[]) => {
       const cur = get().model;

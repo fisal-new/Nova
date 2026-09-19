@@ -21,6 +21,17 @@ export async function checkStorage(): Promise<StorageState> {
   }
 }
 
+/**
+ * Strict variant that THROWS the raw error instead of returning OFF.
+ * Used by on-device diagnosis to tell "plugin unreachable" apart from
+ * "desktop" — the tolerant version above can't distinguish them.
+ */
+export async function checkStorageStrict(): Promise<StorageState> {
+  if (!isTauri) throw new Error("not running inside Tauri");
+  const s = await invoke<StorageState>("plugin:permissions|check_storage", {});
+  return { ...OFF, ...s };
+}
+
 export async function requestLegacyStorage(): Promise<boolean> {
   if (!isTauri) return false;
   try {
