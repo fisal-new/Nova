@@ -1,0 +1,8 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+plugins/*/android/build/
+plugins/*/android/.tauri/
+*.log
+.DS_Store

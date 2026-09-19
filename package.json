@@ -1,0 +1,33 @@
+{
+  "name": "nova-ide",
+  "private": true,
+  "version": "0.8.2",
+  "type": "module",
+  "description": "Nova IDE — mobile-first modern IDE built with Tauri + Rust + React + Monaco",
+  "scripts": {
+    "dev": "vite",
+    "check": "tsc --noEmit",
+    "test": "esbuild scripts/smoke.entry.ts --bundle --platform=node --format=cjs --outfile=/tmp/nova-lib.cjs --log-level=error && node scripts/smoke.mjs",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@monaco-editor/react": "^4.7.0",
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.3",
+    "lucide-react": "^0.469.0",
+    "monaco-editor": "^0.52.2",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7"
+  }
+}

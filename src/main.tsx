@@ -1,0 +1,16 @@
+import React from "react";
+import ReactDOM from "react-dom/client";
+import "./lib/monacoSetup"; // must run before any <Editor> mounts
+import App from "./App";
+import ErrorBoundary from "./components/ErrorBoundary";
+import "./styles/base.css";
+import "./styles/components.css";
+import "./styles/theme.css";
+
+ReactDOM.createRoot(document.getElementById("root")!).render(
+  <React.StrictMode>
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
+  </React.StrictMode>,
+);
