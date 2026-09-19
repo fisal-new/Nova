@@ -559,3 +559,41 @@ shipped classes.dex (re-verified in v0.8.5 artifact).
   longer flagged 2-4x too early); `hasLegacyStorage` does the real check
   on all SDK levels; CI checks both workers.
 - Tests: `cargo test` 5/5, `npm test` 38/38, `tsc` + `vite build` green.
+
+---
+
+# Round 22 — independent maintenance review applied (v0.8.7)
+
+Reviewer-verified, then fixed (agreements and corrections noted):
+
+- **Consent gating (P0-2) FIXED**: the settings-change effect no longer
+  flushes pre-consent reports; "Send test" requires Terms first. Queueing
+  itself stays local-only until consent.
+- **Recursive scrub + logs toggle (P0-3)**: `scrubDeep` covers extra/state/
+  logs/diagnostics; `reportLogs` setting (default ON, one toggle off,
+  synced on boot) + latest-report preview in Settings.
+- **SSRF hardening (P0-5)**: IPv6 loopback/private/link-local, `::ffff:`
+  whole range, bracket-stripped hosts, embedded-IPv4 tails, `.internal.`
+  suffix; 20–30s `fetchWithTimeout` on all three web tools; DNS-rebinding
+  limits documented (no client can resolve-and-recheck).
+- **git pipe deadlock (P1-6)**: `git_timeout` is file-backed with tree-kill
+  like `run_command`.
+- **Process trees (P1-7)**: new `libc` dep; unix process groups + SIGKILL
+  on the group, Windows `taskkill /T`; exit status reported separately.
+- **APK logs (P1-8)**: unique per-build files, truncated at start,
+  keep-newest-3 retention.
+- **porcelain -z (P1-9)**: extracted to tested `parse_porcelain_z`
+  (renames take the NEW path, C-octal decoding) + `unquote_git_path`.
+- **Skipped entries (P1-10)**: `DirListing.skipped` surfaces unreadable
+  entries in the status bar instead of silent omission.
+- **README/audit (P2-11)**: honest trusted-local threat model replaces
+  the stale sandbox claims; roadmap drops shipped CI/tests.
+- **CI (P2-12)**: `cargo fmt --check` + `clippy --all-targets -D warnings`
+  added; fixed all 4 clippy findings + fmt diffs.
+- **Settings copy (P2-13)**: "queued on this device only" wording fixed.
+- Reviewer corrections accepted as wrong: `errorEndpoint` default WAS
+  missing (fixed), capabilities bypass WAS overstated (vendored-scope
+  default-deny verified), key/autoApprove/sh retentions are explicit
+  owner demands (unchanged).
+- Tests: `cargo test` 6/6, `npm test` 44/44, `tsc` + `vite build` +
+  `cargo check` + `clippy` + `fmt` clean.

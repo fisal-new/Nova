@@ -25,7 +25,7 @@ import StatusBar from "./components/StatusBar";
 import TerminalPanel from "./components/TerminalPanel";
 import Terms, { termsAccepted } from "./components/Terms";
 import Toasts from "./components/Toasts";
-import { installReporter, setReportEndpoint, setReportSecret, flushQueue } from "./lib/reporter";
+import { installReporter, setReportEndpoint, setReportSecret, setIncludeLogs, flushQueue } from "./lib/reporter";
 import { useIDE, applySettingsToDom } from "./store/useIDE";
 import { useState } from "react";
 
@@ -92,7 +92,10 @@ export default function App() {
     applySettingsToDom(settings);
     setReportEndpoint(settings.errorEndpoint);
     setReportSecret(settings.appSecret);
-    void flushQueue();
+    setIncludeLogs(settings.reportLogs);
+    // Consent-gated like installReporter below: never transmit queued
+    // reports from settings changes made before Terms acceptance.
+    if (termsAccepted()) void flushQueue();
   }, [settings]);
 
   // follow OS theme while "auto" is selected
@@ -159,7 +162,7 @@ export default function App() {
         <div className="brand">
           <span className="brand-mark">⚡</span>
           Nova IDE
-          <small>v0.8.6</small>
+          <small>v0.8.7</small>
         </div>
         <div className="omnibox" onClick={() => setPalette(true)}>
           <Search size={14} />

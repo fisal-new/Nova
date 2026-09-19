@@ -15,6 +15,7 @@ export interface FileEntry {
 export interface DirListing {
   entries: FileEntry[];
   truncated: boolean;
+  skipped: number;
 }
 
 export interface SearchHit {
@@ -112,7 +113,7 @@ export async function apiSetSandbox(root: string): Promise<void> {
 
 export async function apiListDir(path: string): Promise<DirListing> {
   if (!isTauri) {
-    if (!path || path === "/demo") return { entries: demoTree(), truncated: false };
+    if (!path || path === "/demo") return { entries: demoTree(), truncated: false, skipped: 0 };
     // find subtree
     const find = (nodes: FileEntry[]): FileEntry[] => {
       for (const n of nodes) {
@@ -124,7 +125,7 @@ export async function apiListDir(path: string): Promise<DirListing> {
       }
       return [];
     };
-    return { entries: find(demoTree()), truncated: false };
+    return { entries: find(demoTree()), truncated: false, skipped: 0 };
   }
   return invoke<DirListing>("list_dir", { path, depth: 3 });
 }

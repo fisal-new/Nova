@@ -73,8 +73,10 @@ export interface Settings {
   openrouterKey: string;
   /** Custom AI endpoint (proxy). Empty = OpenRouter directly. */
   aiEndpoint: string;
-  /** Shared secret sent as X-App-Secret (checked only if the proxy sets it). */
+  /** Shared secret sent as X-App-Secret (checked by error-receiver). */
   appSecret: string;
+  /** Attach terminal/output/debug logs to error reports (scrubbed). */
+  reportLogs: boolean;
   /** Where error reports are POSTed. Empty = queue locally only. */
   errorEndpoint: string;
 }
@@ -122,6 +124,7 @@ const defaults: Settings = {
   openrouterKey: "",
   aiEndpoint: "",
   appSecret: "",
+  reportLogs: true,
   errorEndpoint: "",
 };
 
@@ -327,11 +330,12 @@ export const useIDE = create<IDEState>((set, get) => ({
     set({ loading: true });
     try {
       const listing = await apiListDir(rootPath);
+      const notes: string[] = [];
+      if (listing.truncated) notes.push("list truncated at 3000 items — open subfolders directly");
+      if (listing.skipped > 0) notes.push(`${listing.skipped} unreadable entries skipped`);
       set({
         tree: listing.entries,
-        status: listing.truncated
-          ? "list truncated at 3000 items — open subfolders directly"
-          : "ready",
+        status: notes.length > 0 ? notes.join(" • ") : "ready",
       });
     } catch (e) {
       set({ status: friendlyErr(e) });

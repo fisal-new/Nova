@@ -1,4 +1,4 @@
-# ⚡ Nova IDE — v0.8.6
+# ⚡ Nova IDE — v0.8.7
 
 Mobile-first IDE built with **Tauri v2 + Rust + React + Monaco Editor**.
 Same editor engine as VS Code, with a native Rust backend for files,
@@ -22,7 +22,29 @@ search, git, diagnostics and running code.
 - ⌨️ Command palette for files and `> commands`
 - 📱 Mobile-first: touch bar (Run/Debug/Save/Find/Line/Wrap/Font/Terminal),
   in-app dialogs (no native prompt), safe-area insets, 20 persisted settings
-- 🛡️ Sandboxed file API (workspace-scoped), blocked eval flags, strict CSP
+- 🛡️ Hardened runtime: 120s process watchdog (whole-tree kill), strict CSP,
+  secret scrubbing, error reporting with consent gate (details below)
+
+## Threat model (read this before shipping anywhere)
+
+Nova IDE is a **trusted single-user local tool** — like a desktop terminal
+that happens to run on a phone. It is NOT sandboxed and must not be
+described as such:
+
+- The Rust backend reads/writes/deletes any path the OS user can touch and
+  runs any program (`run_command` has no allowlist since v0.7.0, owner
+  decision). Do not open untrusted projects, paste untrusted prompts into
+  the AI with auto-approve on, or share the device while it runs.
+- Past protections (workspace sandbox, eval-flag denylist) were **removed
+  on purpose** — see AUDIT.md status ledger. What remains: timeouts that
+  kill whole process trees, output caps, secret scrubbing, and explicit
+  user confirms for destructive UI actions.
+- Error reports (opted via Terms) contain device info, app state and
+  recent logs — scrubbed of keys, but never point the endpoint at a
+  channel you don't control.
+- Android extras: `MANAGE_EXTERNAL_STORAGE` needs a Play declaration
+  form; the app works fully inside its own workspace with zero extra
+  permissions.
 
 ## Project layout
 
@@ -59,4 +81,4 @@ npx tauri android build --debug --apk -t aarch64
 ## Roadmap (honest — not claimed as done)
 
 Interactive DAP debugger, real LSP servers, extension marketplace,
-git stash, folder virtualization, desktop PTY, full i18n, CI, unit tests.
+git stash, folder virtualization, desktop PTY, full i18n.

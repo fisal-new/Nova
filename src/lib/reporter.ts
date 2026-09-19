@@ -114,6 +114,29 @@ export function scrub(text: string): string {
     .replace(/sk-[A-Za-z0-9]{8,}/g, "[REDACTED-KEY]");
 }
 
+/**
+ * Recursively scrub every string in a value (objects, arrays, nested).
+ * Secrets don't only live in top-level messages — terminal output, tool
+ * results and workspace paths can carry tokens, .env values or keys.
+ */
+export function scrubDeep<T>(value: T): T {
+  if (typeof value === "string") return scrub(value) as unknown as T;
+  if (Array.isArray(value)) return value.map((v) => scrubDeep(v)) as unknown as T;
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) out[k] = scrubDeep(v);
+    return out as unknown as T;
+  }
+  return value;
+}
+
+let includeLogs = true;
+
+/** Settings toggle: attach terminal/output/debug logs + diagnostics or not. */
+export function setIncludeLogs(v: boolean) {
+  includeLogs = v;
+}
+
 export interface StateSnapshot {
   rootPath: string;
   activePath: string;
@@ -147,13 +170,17 @@ function buildReport(
   const e = err instanceof Error ? err : new Error(String(err ?? "unknown"));
   const snap = snapshotProvider?.();
   const nav = typeof navigator !== "undefined" ? navigator : ({} as Navigator);
+  // Every free-form field goes through the recursive scrubber — message and
+  // stack alone are not enough (logs, paths and tool output carry secrets).
+  const scrubStr = (s: string) => scrub(s);
+  const scrubArr = (a: string[]) => a.map((s) => scrub(s.slice(0, 500)));
   return {
     id: `r${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`,
     at: new Date().toISOString(),
     level,
     message: scrub((e.message || String(err)).slice(0, 1000)),
     stack: typeof e.stack === "string" ? scrub(e.stack.slice(0, 3000)) : undefined,
-    extra,
+    extra: extra ? (scrubDeep(extra) as Record<string, string>) : undefined,
     app: {
       version: APP_VERSION,
       backend:
@@ -175,8 +202,8 @@ function buildReport(
     },
     state: snap
       ? {
-          rootPath: snap.rootPath,
-          activePath: snap.activePath,
+          rootPath: scrubStr(snap.rootPath),
+          activePath: scrubStr(snap.activePath),
           language: snap.language,
           tabs: snap.tabs,
           dirty: snap.dirty,
@@ -186,11 +213,18 @@ function buildReport(
           model: snap.model,
         }
       : {},
-    logs: snap
-      ? { terminal: snap.terminal, output: snap.output, debug: snap.debug, status: snap.status }
-      : { terminal: [], output: [], debug: [], status: "" },
+    // Logs attach only when opted in (Settings → Reports → Attach logs).
+    logs:
+      snap && includeLogs
+        ? {
+            terminal: scrubArr(snap.terminal.slice(-30)),
+            output: scrubArr(snap.output.slice(-20)),
+            debug: scrubArr(snap.debug.slice(-20)),
+            status: scrubStr(snap.status),
+          }
+        : { terminal: [], output: [], debug: [], status: "" },
     diagnostics: snap
-      ? { count: snap.diagCount, sample: snap.diagSample }
+      ? { count: snap.diagCount, sample: scrubArr(snap.diagSample) }
       : { count: 0, sample: [] },
   };
 }

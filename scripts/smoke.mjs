@@ -67,12 +67,19 @@ for (const bad of [
   "http://192.168.1.1/",
   "http://172.16.0.1/",
   "http://169.254.169.254/",
+  "http://[::1]/",
+  "http://[::]/",
+  "http://[fc00::1]/",
+  "http://[fe80::1]/",
+  "http://[0:0:0:0:0:ffff:127.0.0.1]/",
   "ftp://example.com/",
   "file:///etc/passwd",
   "not a url",
 ]) {
   ok(safeWebUrl(bad) === null, `blocked: ${bad}`);
 }
+// IPv6 public addresses stay allowed
+ok(safeWebUrl("http://[2606:4700:4700::1111]/") !== null, "public ipv6 ok");
 
 // --- pageToText ---
 const t = pageToText('<html><head><style>a{}</style><script>x</script></head><body><h1>Hi &amp; bye</h1><p>a  b</p></body></html>');

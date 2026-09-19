@@ -320,30 +320,62 @@ function buildSystem(): string {
   return ctx;
 }
 
-/** Block SSRF-ish targets: only public http(s) hosts. */
+/**
+ * Block SSRF-ish targets: only public http(s) hosts.
+ * Textual guard only — it cannot resolve DNS, recheck redirects, or see
+ * through DNS rebinding (documented residual; privileged proxies must
+ * enforce allowlists server-side). IPv6 loopback/private/link-local
+ * forms ([::1], [fc00::/7], [fe80::/10]) are rejected explicitly.
+ */
 export function safeWebUrl(u: string): string | null {
   try {
     const url = new URL(u);
     if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-    const h = url.hostname.toLowerCase();
+    const h = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    // IPv4-mapped IPv6 (::ffff:1.2.3.4): check the embedded IPv4 tail too
+    const tail = h.includes(":") && h.includes(".") ? h.slice(h.lastIndexOf(":") + 1) : "";
+    const v4 = /^\d{1,3}(\.\d{1,3}){3}$/.test(tail) ? tail : h;
     if (
       h === "localhost" ||
       h.endsWith(".localhost") ||
       h.endsWith(".local") ||
       h.endsWith(".internal") ||
+      h.endsWith(".internal.") ||
       /^127\./.test(h) ||
       /^10\./.test(h) ||
       /^192\.168\./.test(h) ||
       /^172\.(1[6-9]|2\d|3[01])\./.test(h) ||
       h === "0.0.0.0" ||
-      h === "[::]" ||
-      h.startsWith("169.254.")
+      h === "::" ||
+      h === "::1" ||
+      h.startsWith("::ffff:") || // any IPv4-mapped address: check tail below
+      /^fc[0-9a-f]{2}:/.test(h) ||
+      /^fd[0-9a-f]{2}:/.test(h) ||
+      /^fe[89ab][0-9a-f]:/.test(h) ||
+      h.startsWith("169.254.") ||
+      // same private-range tests against an embedded IPv4 tail
+      /^127\./.test(v4) ||
+      /^10\./.test(v4) ||
+      /^192\.168\./.test(v4) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(v4) ||
+      v4.startsWith("169.254.")
     ) {
       return null;
     }
     return url.toString();
   } catch {
     return null;
+  }
+}
+
+/** fetch with a hard timeout (AbortSignal.timeout where available). */
+export async function fetchWithTimeout(url: string, init: RequestInit, ms = 20000): Promise<Response> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(new Error("fetch timed out")), ms);
+  try {
+    return await fetch(url, { ...init, signal: ctrl.signal });
+  } finally {
+    clearTimeout(t);
   }
 }
 
@@ -455,7 +487,7 @@ async function execTool(
         const q = str(args.query).trim();
         if (!q) return "empty query";
         try {
-          const res = await fetch(
+          const res = await fetchWithTimeout(
             `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(q)}`,
             { headers: { "User-Agent": "Mozilla/5.0 (Linux; Android 14) NovaIDE" } },
           );
@@ -481,7 +513,7 @@ async function execTool(
         const safe = safeWebUrl(str(args.url));
         if (!safe) return "blocked URL (only public http/https)";
         try {
-          const res = await fetch(safe, {
+          const res = await fetchWithTimeout(safe, {
             headers: { "User-Agent": "Mozilla/5.0 (Linux; Android 14) NovaIDE" },
           });
           if (!res.ok) return `fetch HTTP ${res.status}`;
@@ -496,9 +528,9 @@ async function execTool(
         if (!safe) return "blocked URL (only public http/https)";
         const p = resolve(str(args.path));
         try {
-          const res = await fetch(safe, {
+          const res = await fetchWithTimeout(safe, {
             headers: { "User-Agent": "Mozilla/5.0 (Linux; Android 14) NovaIDE" },
-          });
+          }, 30000);
           if (!res.ok) return `download HTTP ${res.status}`;
           const ct = (res.headers.get("content-type") || "").toLowerCase();
           if (!/text|json|javascript|xml|markdown|csv|svg/.test(ct) && ct) {

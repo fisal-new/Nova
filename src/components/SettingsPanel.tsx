@@ -7,6 +7,7 @@ import {
   getQueueLength,
   peekReports,
   reportError,
+  setIncludeLogs,
   setReportEndpoint,
 } from "../lib/reporter";
 
@@ -214,11 +215,16 @@ function ReportsSection() {
     useIDE.getState().updateSettings({ errorEndpoint: endpoint.trim() });
     setReportEndpoint(endpoint.trim());
     void flushQueue().then(refresh);
-    notify("success", endpoint.trim() ? "Custom reports endpoint saved." : "Using the built-in developer channel.");
+    notify("success", endpoint.trim() ? "Custom reports endpoint saved." : "Reports stay queued on this device only.");
     refresh();
   };
 
   const sendTest = async () => {
+    const { termsAccepted } = await import("./Terms");
+    if (!termsAccepted()) {
+      notify("info", "Accept the Terms first — reports stay on this device until then.");
+      return;
+    }
     reportError("test", "Manual test report from Settings", { by: "user" });
     const r = await flushQueue();
     refresh();
@@ -246,8 +252,7 @@ function ReportsSection() {
     <>
       <div className="grp">error reports ({pending} pending)</div>
       <div className="set-row" style={{ flexDirection: "column", alignItems: "stretch", gap: 8 }}>
-        <span>Server URL — mandatory built-in channel is used when empty</span>
-        <input
+        <span>Server URL — empty means queued on this device only</span>        <input
           value={endpoint}
           onChange={(e) => setEndpoint(e.target.value)}
           placeholder="built-in developer channel (or paste your own)"
@@ -283,6 +288,32 @@ function ReportsSection() {
           Discord webhook URLs work directly (auto-formatted): Discord channel
           → Settings → Integrations → Webhooks → Copy URL → paste here.
         </span>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+          <input
+            type="checkbox"
+            checked={useIDE((s) => s.settings.reportLogs)}
+            onChange={(e) => {
+              useIDE.getState().updateSettings({ reportLogs: e.target.checked });
+              setIncludeLogs(e.target.checked);
+              refresh();
+            }}
+          />
+          Attach terminal/output logs to reports (scrubbed)
+        </label>
+        <details style={{ fontSize: 11 }}>
+          <summary style={{ cursor: "pointer", color: "var(--txt-2)" }}>
+            Preview what the next report contains
+          </summary>
+          <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 180, overflow: "auto" }}>
+            {(() => {
+              const all = peekReports();
+              const last = all[all.length - 1];
+              if (!last) return "No reports yet — trigger one with “Send test”.";
+              const keys = Object.keys(last).join(", ");
+              return `keys: ${keys}\nlogs attached: ${last.logs.terminal.length + last.logs.output.length + last.logs.debug.length > 0 ? "yes" : "no"}\nmessage: ${String(last.message).slice(0, 200)}`;
+            })()}
+          </pre>
+        </details>
       </div>
     </>
   );

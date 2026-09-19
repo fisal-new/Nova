@@ -68,6 +68,10 @@ pub struct FileEntry {
 pub struct DirListing {
     pub entries: Vec<FileEntry>,
     pub truncated: bool,
+    /// Entries we deliberately did not return: unreadable metadata,
+    /// unreadable directories, broken symlinks. Shown in the UI so large
+    /// projects never look silently incomplete.
+    pub skipped: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -77,13 +81,25 @@ pub struct SearchHit {
     pub preview: String,
 }
 
-fn to_entry(path: &Path, depth: usize, budget: &mut usize, truncated: &mut bool) -> Option<FileEntry> {
+fn to_entry(
+    path: &Path,
+    depth: usize,
+    budget: &mut usize,
+    truncated: &mut bool,
+    skipped: &mut usize,
+) -> Option<FileEntry> {
     if *budget == 0 {
         *truncated = true;
         return None;
     }
     *budget -= 1;
-    let meta = fs::symlink_metadata(path).ok()?;
+    let meta = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(_) => {
+            *skipped += 1;
+            return None;
+        }
+    };
     let name = path
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
@@ -92,11 +108,17 @@ fn to_entry(path: &Path, depth: usize, budget: &mut usize, truncated: &mut bool)
     let size = if is_dir { 0 } else { meta.len() };
 
     let children = if is_dir && depth > 0 {
-        let mut items: Vec<FileEntry> = fs::read_dir(path)
-            .ok()?
+        let rd = match fs::read_dir(path) {
+            Ok(rd) => rd,
+            Err(_) => {
+                *skipped += 1;
+                return None;
+            }
+        };
+        let mut items: Vec<FileEntry> = rd
             .filter_map(|e| e.ok())
             .filter(|e| !skip_dir_name(&e.file_name().to_string_lossy()))
-            .filter_map(|e| to_entry(&e.path(), depth - 1, budget, truncated))
+            .filter_map(|e| to_entry(&e.path(), depth - 1, budget, truncated, skipped))
             .collect();
         items.sort_by(|a, b| {
             b.is_dir
@@ -121,8 +143,19 @@ fn to_entry(path: &Path, depth: usize, budget: &mut usize, truncated: &mut bool)
 fn skip_dir_name(name: &str) -> bool {
     matches!(
         name,
-        "node_modules" | "target" | "dist" | ".git" | "build" | ".next" | "__pycache__" | ".venv" | "vendor" | "Pods" | ".gradle"
-    ) || name.starts_with('.') && matches!(name, ".cache" | ".parcel-cache" | ".turbo" | ".svn" | ".hg")
+        "node_modules"
+            | "target"
+            | "dist"
+            | ".git"
+            | "build"
+            | ".next"
+            | "__pycache__"
+            | ".venv"
+            | "vendor"
+            | "Pods"
+            | ".gradle"
+    ) || name.starts_with('.')
+        && matches!(name, ".cache" | ".parcel-cache" | ".turbo" | ".svn" | ".hg")
 }
 
 #[tauri::command]
@@ -135,25 +168,35 @@ fn list_dir(path: String, depth: Option<usize>) -> Result<DirListing, String> {
     if base.is_file() {
         let mut budget = 4;
         let mut truncated = false;
-        return to_entry(&base, 0, &mut budget, &mut truncated)
-            .map(|e| DirListing { entries: vec![e], truncated })
+        let mut skipped = 0;
+        return to_entry(&base, 0, &mut budget, &mut truncated, &mut skipped)
+            .map(|e| DirListing {
+                entries: vec![e],
+                truncated,
+                skipped,
+            })
             .ok_or("read failed".into());
     }
     // mobile guard: never return more than ~3000 nodes per call
     let mut budget: usize = 3000;
     let mut truncated = false;
+    let mut skipped = 0;
     let mut items: Vec<FileEntry> = fs::read_dir(&base)
         .map_err(io_err)?
         .filter_map(|e| e.ok())
         .filter(|e| !skip_dir_name(&e.file_name().to_string_lossy()))
-        .filter_map(|e| to_entry(&e.path(), d, &mut budget, &mut truncated))
+        .filter_map(|e| to_entry(&e.path(), d, &mut budget, &mut truncated, &mut skipped))
         .collect();
     items.sort_by(|a, b| {
         b.is_dir
             .cmp(&a.is_dir)
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
-    Ok(DirListing { entries: items, truncated })
+    Ok(DirListing {
+        entries: items,
+        truncated,
+        skipped,
+    })
 }
 
 #[tauri::command]
@@ -171,7 +214,7 @@ fn read_file(path: String) -> Result<String, String> {
     }
     let bytes = fs::read(&path).map_err(io_err)?;
     let (cow, _, _) = encoding_rs::UTF_8.decode(&bytes);
-    if cow.len() > 2_000_000 as usize {
+    if cow.len() > 2_000_000_usize {
         return Err("File too large to open on mobile (>2MB)".into());
     }
     Ok(cow.into_owned())
@@ -229,7 +272,11 @@ fn rename_path(from: String, to: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn search_in_files(root: String, query: String, max_results: Option<usize>) -> Result<Vec<SearchHit>, String> {
+fn search_in_files(
+    root: String,
+    query: String,
+    max_results: Option<usize>,
+) -> Result<Vec<SearchHit>, String> {
     if query.trim().is_empty() {
         return Ok(vec![]);
     }
@@ -351,7 +398,7 @@ fn run_command(
         .open(&out_path)
         .map_err(io_err)?;
     let err_file = out_file.try_clone().map_err(io_err)?;
-    let mut child = Command::new(&program)
+    let mut child = spawn_grouped(&program)
         .args(&args)
         .current_dir(if cwd.is_empty() { "." } else { &cwd })
         .stdin(if stdin_data.is_some() {
@@ -367,12 +414,14 @@ fn run_command(
     // child also streams output can no longer deadlock either side.
     let mut stdin_handle = child.stdin.take();
     // Wait with a timeout so hung servers/infinite loops can't run forever.
-    // std-only: poll the child, kill on expiry.
+    // std-only: poll the child, kill on expiry. The scope block RETURNS the
+    // outcome, so there is no uninitialized-variable dance for the compiler
+    // or clippy to complain about.
     let timeout = Duration::from_secs(120);
     let step = Duration::from_millis(100);
     let mut waited = Duration::ZERO;
     let mut timed_out = false;
-    std::thread::scope(|s| {
+    let exit_code: Option<i32> = std::thread::scope(|s| {
         s.spawn(|| {
             if let Some(input) = stdin_data {
                 if let Some(mut stdin) = stdin_handle.take() {
@@ -382,28 +431,46 @@ fn run_command(
         });
         loop {
             match child.try_wait() {
-                Ok(Some(_)) => break,
+                Ok(Some(status)) => break status.code(),
                 Ok(None) => {
                     if waited >= timeout {
-                        let _ = child.kill();
+                        // kill the whole tree (npm/cargo leave children behind)
+                        kill_tree(child.id());
                         let _ = child.wait();
                         timed_out = true;
-                        break;
+                        break None;
                     }
                     std::thread::sleep(step);
                     waited += step;
                 }
-                Err(_) => break,
+                Err(_) => break None,
             }
         }
     });
     let mut s = std::fs::read_to_string(&out_path).unwrap_or_default();
     let _ = std::fs::remove_file(&out_path);
     if timed_out {
-        s.push_str("\n(timed out after 120s — process killed)");
+        s.push_str("\n(timed out after 120s — process tree killed)");
     }
-    if s.trim().is_empty() {
-        s = "(command produced no output)".to_string();
+    // Exit status is reported separately from stdout (never inferred from it).
+    match exit_code {
+        Some(0) => {
+            if s.trim().is_empty() {
+                s = "(command produced no output)".to_string();
+            }
+        }
+        Some(n) => {
+            if s.trim().is_empty() {
+                s = format!("(exit {})", n);
+            } else {
+                s.push_str(&format!("\n(exit code {})", n));
+            }
+        }
+        None => {
+            if s.trim().is_empty() {
+                s = "(command produced no output)".to_string();
+            }
+        }
     }
     // git over the terminal can't do interactive auth: say so plainly instead
     // of leaving the user staring at a bare timeout.
@@ -416,6 +483,74 @@ fn run_command(
         s.push_str("\n… truncated");
     }
     Ok(s)
+}
+
+/// Decode a git-quoted path: `"a b"` → `a b`, octal escapes (`\303\244`)
+/// → UTF-8. Plain paths pass through untouched.
+fn unquote_git_path(p: &str) -> String {
+    let t = p.trim();
+    if !(t.starts_with('"') && t.ends_with('"') && t.len() >= 2) {
+        return t.to_string();
+    }
+    let inner = &t[1..t.len() - 1];
+    let mut out = String::with_capacity(inner.len());
+    let mut bytes: Vec<u8> = Vec::with_capacity(inner.len());
+    let mut chars = inner.chars().peekable();
+    let flush = |bytes: &mut Vec<u8>, out: &mut String| {
+        if !bytes.is_empty() {
+            out.push_str(&String::from_utf8_lossy(bytes));
+            bytes.clear();
+        }
+    };
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.peek() {
+                Some('n') => {
+                    flush(&mut bytes, &mut out);
+                    out.push('\n');
+                    chars.next();
+                }
+                Some('t') => {
+                    flush(&mut bytes, &mut out);
+                    out.push('\t');
+                    chars.next();
+                }
+                Some('"') | Some('\\') => {
+                    flush(&mut bytes, &mut out);
+                    out.push(chars.next().unwrap());
+                }
+                Some(d) if d.is_ascii_digit() => {
+                    // \ooo octal byte
+                    let mut val: u32 = 0;
+                    for _ in 0..3 {
+                        match chars.peek() {
+                            Some(d2) if d2.is_digit(8) => {
+                                val = val * 8 + d2.to_digit(8).unwrap();
+                                chars.next();
+                            }
+                            _ => break,
+                        }
+                    }
+                    bytes.push(val as u8);
+                }
+                _ => {
+                    flush(&mut bytes, &mut out);
+                    out.push('\\');
+                }
+            }
+        } else {
+            // buffer ASCII bytes so multi-byte UTF-8 sequences survive;
+            // (non-ASCII chars are pushed as-is after flushing)
+            if c.is_ascii() {
+                bytes.push(c as u8);
+            } else {
+                flush(&mut bytes, &mut out);
+                out.push(c);
+            }
+        }
+    }
+    flush(&mut bytes, &mut out);
+    out
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -434,36 +569,109 @@ fn git(args: &[&str], cwd: &str) -> Result<String, String> {
 }
 /// Same as spawning via `run_command` but for internal git calls: bounded by
 /// a timeout so a credential/gpg prompt can never hang the UI forever.
+/// Output is file-backed (same pipe-deadlock class as run_command).
 fn git_timeout(args: &[&str], cwd: &str, secs: u64) -> Result<String, String> {
-    let mut child = Command::new("git")
+    static GIT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let out_path = std::env::temp_dir().join(format!(
+        "nova-git-{}-{}.log",
+        std::process::id(),
+        GIT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let out_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&out_path)
+        .map_err(io_err)?;
+    let err_file = out_file.try_clone().map_err(io_err)?;
+    let mut child = spawn_grouped("git");
+    child
         .args(args)
         .current_dir(if cwd.is_empty() { "." } else { cwd })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| spawn_err("git", e))?;
+        .stdout(Stdio::from(out_file))
+        .stderr(Stdio::from(err_file));
+    let mut child = child.spawn().map_err(|e| spawn_err("git", e))?;
     let timeout = Duration::from_secs(secs);
     let step = Duration::from_millis(100);
     let mut waited = Duration::ZERO;
+    let exit_code: Option<i32>;
     loop {
         match child.try_wait().map_err(|e| e.to_string())? {
-            Some(_) => break,
+            Some(status) => {
+                exit_code = status.code();
+                break;
+            }
             None => {
                 if waited >= timeout {
-                    let _ = child.kill();
+                    kill_tree(child.id());
                     let _ = child.wait();
-                    return Err(format!("git timed out after {}s — killed", secs));
+                    let _ = std::fs::remove_file(&out_path);
+                    return Err(format!(
+                        "git timed out after {}s — process tree killed",
+                        secs
+                    ));
                 }
                 std::thread::sleep(step);
                 waited += step;
             }
         }
     }
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    let s = std::fs::read_to_string(&out_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&out_path);
+    // split combined log back into streams is impossible post-hoc; git writes
+    // errors to stderr which we appended second — failure text still surfaces.
+    if exit_code != Some(0) {
+        let tail: String = s
+            .lines()
+            .rev()
+            .take(5)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(if tail.trim().is_empty() {
+            format!("git exited with code {:?}", exit_code)
+        } else {
+            tail.trim().to_string()
+        });
     }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    Ok(s)
+}
+
+/// Parse `git status --porcelain=v1 -z` output. Returns
+/// (modified, untracked, staged). Pure function — unit tested.
+/// NUL is written as unicode escape to keep editors/linters calm.
+fn parse_porcelain_z(porcelain: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut modified = vec![];
+    let mut untracked = vec![];
+    let mut staged = vec![];
+    let mut records = porcelain.split('\u{0}').peekable();
+    while let Some(rec) = records.next() {
+        if rec.len() < 4 {
+            continue;
+        }
+        let mut chars = rec.chars();
+        let x = chars.next().unwrap_or(' ');
+        let y = chars.next().unwrap_or(' ');
+        let mut path = rec[3..].trim().to_string();
+        // renames/copies carry a second record with the NEW path
+        if (x == 'R' || x == 'C' || y == 'R' || y == 'C') && records.peek().is_some() {
+            path = records.next().unwrap_or_default().trim().to_string();
+        }
+        let path = unquote_git_path(&path);
+        if x == '?' && y == '?' {
+            untracked.push(path);
+        } else {
+            if x != ' ' {
+                staged.push(path.clone());
+            }
+            if y != ' ' {
+                modified.push(path);
+            }
+        }
+    }
+    (modified, untracked, staged)
 }
 
 #[tauri::command]
@@ -484,39 +692,28 @@ fn git_status(cwd: String) -> Result<GitStatus, String> {
         .unwrap_or_default()
         .trim()
         .to_string();
-    let porcelain = git(&["status", "--porcelain=v1"], &cwd).unwrap_or_default();
+    let porcelain = git(&["status", "--porcelain=v1", "-z"], &cwd).unwrap_or_default();
     // ahead/behind vs upstream (0/0 when no upstream is configured)
-    let (ahead, behind) = git(&["rev-list", "--left-right", "--count", "@{u}...HEAD"], &cwd)
-        .ok()
-        .and_then(|s| {
-            let mut it = s.split_whitespace();
-            let behind = it.next()?.parse::<u32>().ok()?;
-            let ahead = it.next()?.parse::<u32>().ok()?;
-            Some((ahead, behind))
-        })
-        .unwrap_or((0, 0));
-    let mut modified = vec![];
-    let mut untracked = vec![];
-    let mut staged = vec![];
-    for line in porcelain.lines() {
-        if line.len() < 4 {
-            continue;
-        }
-        let (x, y) = (line.chars().next().unwrap_or(' '), line.chars().nth(1).unwrap_or(' '));
-        let path = line[3..].trim().to_string();
-        if x == '?' && y == '?' {
-            untracked.push(path);
-        } else {
-            if x != ' ' {
-                staged.push(path.clone());
-            }
-            if y != ' ' {
-                modified.push(path);
-            }
-        }
-    }
+    let (ahead, behind) = git(
+        &["rev-list", "--left-right", "--count", "@{u}...HEAD"],
+        &cwd,
+    )
+    .ok()
+    .and_then(|s| {
+        let mut it = s.split_whitespace();
+        let behind = it.next()?.parse::<u32>().ok()?;
+        let ahead = it.next()?.parse::<u32>().ok()?;
+        Some((ahead, behind))
+    })
+    .unwrap_or((0, 0));
+    // NUL-separated records (path, or orig/new pair for renames).
+    let (modified, untracked, staged) = parse_porcelain_z(&porcelain);
     Ok(GitStatus {
-        branch: if branch.is_empty() { "HEAD".into() } else { branch },
+        branch: if branch.is_empty() {
+            "HEAD".into()
+        } else {
+            branch
+        },
         modified,
         untracked,
         staged,
@@ -529,9 +726,8 @@ fn git_status(cwd: String) -> Result<GitStatus, String> {
 #[tauri::command]
 fn git_diff(cwd: String, path: Option<String>, staged: Option<bool>) -> Result<String, String> {
     // (no sandbox — trusted local device, see top of file)
-    let owned;
     let target = path.as_deref().unwrap_or(".");
-    owned = target.to_string();
+    let owned = target.to_string();
     let args: Vec<&str> = if staged.unwrap_or(false) {
         vec!["diff", "--cached", "--no-color", "--", &owned]
     } else {
@@ -546,7 +742,10 @@ fn git_checkout(cwd: String, branch: String) -> Result<String, String> {
     // (no sandbox — trusted local device, see top of file)
     let b = branch.trim();
     // reject flags disguised as branch names (e.g. "--force", "-b")
-    if b.is_empty() || b.starts_with('-') || b.contains(|c: char| c.is_whitespace() || c == ';' || c == '&' || c == '|') {
+    if b.is_empty()
+        || b.starts_with('-')
+        || b.contains(|c: char| c.is_whitespace() || c == ';' || c == '&' || c == '|')
+    {
         return Err("invalid branch name".into());
     }
     git(&["checkout", b], &cwd)
@@ -572,7 +771,10 @@ fn git_commit(cwd: String, message: String, add_all: Option<bool>) -> Result<Str
 fn git_branches(cwd: String) -> Result<Vec<String>, String> {
     // (no sandbox — trusted local device, see top of file)
     let s = git(&["branch", "--format=%(refname:short)"], &cwd).unwrap_or_default();
-    Ok(s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+    Ok(s.lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
 }
 
 #[tauri::command]
@@ -580,11 +782,7 @@ fn git_log(cwd: String, limit: Option<u32>) -> Result<Vec<GitCommit>, String> {
     // (no sandbox — trusted local device, see top of file)
     let n = limit.unwrap_or(30).min(100).to_string();
     let fmt = "--pretty=format:%H%x1f%an%x1f%ad%x1f%s".to_string();
-    let s = git(
-        &["log", &format!("-{}", n), &fmt, "--date=short"],
-        &cwd,
-    )
-    .unwrap_or_default();
+    let s = git(&["log", &format!("-{}", n), &fmt, "--date=short"], &cwd).unwrap_or_default();
     let mut out = vec![];
     for line in s.lines() {
         let parts: Vec<&str> = line.split('\x1f').collect();
@@ -689,20 +887,42 @@ struct BuildState {
     started_at: Option<String>,
 }
 
-/// Best-effort kill by pid (no extra deps). Used for timeout + cancel.
-fn kill_pid(pid: u32) {
+/// Kill a whole process TREE, not just the direct child: shell/npm/cargo
+/// routinely leave descendants running otherwise. Children are spawned as
+/// process-group leaders (see spawn_grouped), so a negative pid reaches all.
+fn kill_tree(pid: u32) {
     #[cfg(unix)]
     {
-        let _ = Command::new("kill")
-            .arg("-9")
-            .arg(pid.to_string())
-            .output();
+        // SAFETY: kill(2) with SIGKILL has no memory effects; pid comes from
+        // our own spawned child, group id == pid by construction.
+        unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
     }
     #[cfg(windows)]
     {
+        // /T = terminate the process tree rooted at pid
         let _ = Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F"])
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
             .output();
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+    }
+}
+
+/// Spawn with the child as its own process-group leader so kill_tree can
+/// reap descendants too. (Windows: groups are handled by taskkill /T.)
+fn spawn_grouped(program: &str) -> Command {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let mut cmd = Command::new(program);
+        cmd.process_group(0);
+        cmd
+    }
+    #[cfg(not(unix))]
+    {
+        Command::new(program)
     }
 }
 
@@ -715,6 +935,36 @@ fn now_stamp() -> String {
 
 fn apk_log_path() -> PathBuf {
     std::env::temp_dir().join("nova-apk-build.log")
+}
+
+/// Unique log per build + retention: a later build must never show the
+/// previous build's tail or detect its APK path (old fixed-name bug).
+fn apk_log_path_for(id: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("nova-apk-build-{}.log", id))
+}
+
+fn prune_apk_logs() {
+    // Retention: keep the 2 newest existing logs; the build starting now
+    // gets a fresh file, so at most 3 ever accumulate.
+    let tmp = std::env::temp_dir();
+    let mut logs: Vec<(std::time::SystemTime, PathBuf)> = vec![];
+    if let Ok(rd) = std::fs::read_dir(&tmp) {
+        for e in rd.filter_map(|e| e.ok()) {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with("nova-apk-build-") && name.ends_with(".log") {
+                let mtime = e
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                logs.push((mtime, e.path()));
+            }
+        }
+    }
+    logs.sort_by_key(|(t, _)| *t);
+    let drop_n = logs.len().saturating_sub(2);
+    for (_, p) in logs.into_iter().take(drop_n) {
+        let _ = std::fs::remove_file(p);
+    }
 }
 
 /// Find the Nova project root (folder containing src-tauri/tauri.conf.json)
@@ -756,8 +1006,10 @@ fn start_android_build(target: Option<String>) -> Result<String, String> {
     if st.running {
         return Err("a build is already running — poll it first".into());
     }
-    let log_path = apk_log_path();
     let target = target.unwrap_or_else(|| "aarch64".into());
+    let build_id = format!("{}-{}", now_stamp(), target);
+    prune_apk_logs();
+    let log_path = apk_log_path_for(&build_id);
     if !["aarch64", "armv7", "x86_64", "i686"].contains(&target.as_str()) {
         return Err("invalid target (aarch64|armv7|x86_64|i686)".into());
     }
@@ -798,7 +1050,6 @@ fn start_android_build(target: Option<String>) -> Result<String, String> {
         // opens would wipe each other's bytes.)
         let log_file = std::fs::OpenOptions::new()
             .create(true)
-            .write(true)
             .append(true)
             .open(&log_clone);
         let finish = |code: Option<i32>, note: &str| {
@@ -816,12 +1067,14 @@ fn start_android_build(target: Option<String>) -> Result<String, String> {
         let mut child = match (|| -> Result<std::process::Child, std::io::Error> {
             let f = log_file?;
             let f2 = f.try_clone()?;
-            Command::new("npx")
-                .args(["tauri", "android", "build", "--debug", "--apk", "-t", &target])
-                .current_dir(find_project_root().unwrap_or_else(|| PathBuf::from(".")))
-                .stdout(Stdio::from(f))
-                .stderr(Stdio::from(f2))
-                .spawn()
+            let mut cmd = spawn_grouped("npx");
+            cmd.args([
+                "tauri", "android", "build", "--debug", "--apk", "-t", &target,
+            ])
+            .current_dir(find_project_root().unwrap_or_else(|| PathBuf::from(".")))
+            .stdout(Stdio::from(f))
+            .stderr(Stdio::from(f2));
+            cmd.spawn()
         })() {
             Ok(c) => c,
             Err(e) => {
@@ -840,7 +1093,7 @@ fn start_android_build(target: Option<String>) -> Result<String, String> {
         let outcome: Option<i32> = loop {
             let cancelled = APK_BUILD.lock().map(|st| st.cancelled).unwrap_or(false);
             if cancelled {
-                kill_pid(child.id());
+                kill_tree(child.id());
                 let _ = child.wait();
                 finish(None, "cancelled by user");
                 return;
@@ -849,7 +1102,7 @@ fn start_android_build(target: Option<String>) -> Result<String, String> {
                 Ok(Some(status)) => break status.code(),
                 Ok(None) => {
                     if waited >= timeout {
-                        kill_pid(child.id());
+                        kill_tree(child.id());
                         let _ = child.wait();
                         finish(
                             Some(-2),
@@ -882,7 +1135,7 @@ fn cancel_android_build() -> Result<String, String> {
     }
     st.cancelled = true;
     if let Some(pid) = st.pid {
-        kill_pid(pid);
+        kill_tree(pid);
     }
     Ok("cancel requested — poll to confirm it stopped".into())
 }
@@ -924,7 +1177,8 @@ fn poll_android_build() -> Result<BuildStatus, String> {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {    tauri::Builder::default()
+pub fn run() {
+    tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_permissions::init())
         .invoke_handler(tauri::generate_handler![
@@ -987,7 +1241,8 @@ mod tests {
     }
 
     #[test]
-    fn read_refuses_big_files_before_loading() {        let root = std::env::temp_dir().join("nova-sizecheck-test");
+    fn read_refuses_big_files_before_loading() {
+        let root = std::env::temp_dir().join("nova-sizecheck-test");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         // 3MB of zeroes: must be refused by metadata, not loaded
@@ -998,13 +1253,46 @@ mod tests {
         // small file still opens
         let small = root.join("small.txt");
         fs::write(&small, "hi").unwrap();
-        assert_eq!(read_file(small.to_string_lossy().to_string()).unwrap(), "hi");
+        assert_eq!(
+            read_file(small.to_string_lossy().to_string()).unwrap(),
+            "hi"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
+    fn porcelain_z_handles_renames_and_quotes() {
+        let nul = '\u{0}';
+        // M = modified file, ?? = untracked, R = rename orig->new, quoted name
+        let sample = format!(
+            " M src/a.rs{nul}?? new.txt{nul}R  old.rs{nul}new.rs{nul}\"my file.txt\"{nul}",
+        );
+        let (modified, untracked, staged) = parse_porcelain_z(&sample);
+        assert!(modified.contains(&"src/a.rs".to_string()), "{:?}", modified);
+        assert!(
+            untracked.contains(&"new.txt".to_string()),
+            "{:?}",
+            untracked
+        );
+        assert!(staged.contains(&"new.rs".to_string()), "{:?}", staged);
+        assert!(!staged.iter().any(|p| p == "old.rs"), "{:?}", staged);
+        let (m2, _, _) = parse_porcelain_z(&format!(" M \"my file.txt\"{nul}"));
+        assert!(m2.contains(&"my file.txt".to_string()), "{:?}", m2);
+        // octal-escaped unicode name decodes
+        let (m3, _, _) = parse_porcelain_z(&format!(" M \"\\303\\244bc\"{nul}"));
+        assert!(m3.contains(&"äbc".to_string()), "{:?}", m3);
+    }
+
+    #[test]
     fn skip_dirs_cover_heavy_trees() {
-        for d in ["node_modules", "target", "dist", ".git", "__pycache__", ".venv"] {
+        for d in [
+            "node_modules",
+            "target",
+            "dist",
+            ".git",
+            "__pycache__",
+            ".venv",
+        ] {
             assert!(skip_dir_name(d), "{}", d);
         }
         assert!(!skip_dir_name("src"));
