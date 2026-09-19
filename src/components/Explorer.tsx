@@ -15,7 +15,7 @@ import {
   Pencil,
 } from "lucide-react";
 import { useState } from "react";
-import { friendlyErr, languageForPath } from "../lib/tauri";
+import { apiListDir, friendlyErr, languageForPath } from "../lib/tauri";
 import { checkStorage, storageReady } from "../lib/permissions";
 import { useIDE } from "../store/useIDE";
 import type { FileEntry } from "../lib/tauri";
@@ -135,6 +135,23 @@ export default function Explorer() {
             );
             return;
           }
+          // Android/data + Android/obb are blocked by Google even WITH
+          // all-files access — say so now, not after a raw os error 13.
+          if (/\/Android\/(data|obb)(\/|$)/.test(sel)) {
+            useIDE.getState().notify(
+              "error",
+              "Android blocks this folder for ALL apps (even with full access). Pick another folder.",
+            );
+            return;
+          }
+          // Verify the folder is actually listable BEFORE switching the
+          // whole UI to it — a dead root is worse than no switch at all.
+          try {
+            await apiListDir(sel);
+          } catch (e) {
+            useIDE.getState().notify("error", `Can't open this folder: ${friendlyErr(e)}`);
+            return;
+          }
           await setRoot(sel);
           return;
         }
@@ -143,7 +160,21 @@ export default function Explorer() {
       useIDE.getState().notify("error", `Folder picker failed: ${friendlyErr(e)}`);
     }
     const v = await useIDE.getState().askPrompt("Folder path (e.g. /demo):", rootPath);
-    if (v) await setRoot(v);
+    if (!v) return;
+    if (/\/Android\/(data|obb)(\/|$)/.test(v)) {
+      useIDE.getState().notify(
+        "error",
+        "Android blocks this folder for ALL apps (even with full access). Pick another folder.",
+      );
+      return;
+    }
+    try {
+      await apiListDir(v);
+    } catch (e) {
+      useIDE.getState().notify("error", `Can't open this folder: ${friendlyErr(e)}`);
+      return;
+    }
+    await setRoot(v);
   };
 
   return (

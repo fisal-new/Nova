@@ -485,3 +485,19 @@ silently denied everything and os error 13 survived. Fixed:
 - Tests: `cargo test` 4/4, `npm test` 38/38, `tsc` + `vite build` green.
   Release APK v0.8.2 arm64, 16MB, signed (permissions re-verified with
   apkanalyzer in the merged manifest).
+
+---
+
+# Round 18 — ground-truth storage diagnosis (v0.8.3)
+
+Honest framing: os error 13 cannot be debugged blind. This round makes
+the DEVICE report the truth instead of guessing from here:
+- StorageBanner gained a **Storage test** button: permission state
+  (sdk/legacy/allFiles/root) + real `list_dir` of the current folder +
+  a write+delete probe round-trip, each ✓/✗ with the raw detail inline.
+- `pickFolder` (both dialog + manual path) now refuses
+  `*/Android/data|obb/*` up front — Google blocks those for every app
+  even with all-files access — and verifies listability BEFORE switching
+  the whole UI to a dead root.
+- Welcome `.card` backgrounds are transparent glass now (was: solid fill).
+- Release APK v0.8.3 arm64, 16MB, signed. Tests green (38 + 4 + tsc).

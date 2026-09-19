@@ -30,14 +30,17 @@
 }
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-top: 20px; }
 .card {
-  background: var(--bg-2);
+  background: transparent;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 15px;
   cursor: pointer;
   transition: 0.18s;
 }
-.card:hover { transform: translateY(-3px); border-color: rgba(255,255,255,.22); box-shadow: var(--shadow); }
+.card:hover { transform: translateY(-3px); border-color: rgba(255,255,255,.22); box-shadow: var(--shadow); background: rgba(255,255,255,.03); }
+[data-theme="light"] .card:hover { background: rgba(20,25,45,.04); }
 .card h4 { margin: 10px 0 5px; font-size: 13.5px; }
 .card p { margin: 0; font-size: 12px; }
 .card .k { display: inline-block; margin-top: 9px; font-family: var(--mono); font-size: 11px; background: var(--bg-4); padding: 2px 8px; border-radius: 6px; color: var(--txt-1); }

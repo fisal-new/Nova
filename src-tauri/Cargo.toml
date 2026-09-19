@@ -1,6 +1,6 @@
 [package]
 name = "nova-ide"
-version = "0.8.2"
+version = "0.8.4"
 description = "Nova IDE — mobile-first IDE with Tauri + Rust"
 authors = ["Nova IDE"]
 edition = "2021"
