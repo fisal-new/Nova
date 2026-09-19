@@ -435,11 +435,27 @@ fn git(args: &[&str], cwd: &str) -> Result<String, String> {
 /// Same as spawning via `run_command` but for internal git calls: bounded by
 /// a timeout so a credential/gpg prompt can never hang the UI forever.
 fn git_timeout(args: &[&str], cwd: &str, secs: u64) -> Result<String, String> {
+    // Never leave Git connected to unread pipes while waiting. A large diff
+    // (or noisy hook/error) fills an OS pipe, blocks Git before it exits, and
+    // used to turn a successful command into a 30-second timeout.
+    static GIT_OUT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let out_path = std::env::temp_dir().join(format!(
+        "nova-git-{}-{}.log",
+        std::process::id(),
+        GIT_OUT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let out_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&out_path)
+        .map_err(io_err)?;
+    let err_file = out_file.try_clone().map_err(io_err)?;
     let mut child = Command::new("git")
         .args(args)
         .current_dir(if cwd.is_empty() { "." } else { cwd })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::from(out_file))
+        .stderr(Stdio::from(err_file))
         .spawn()
         .map_err(|e| spawn_err("git", e))?;
     let timeout = Duration::from_secs(secs);
@@ -452,6 +468,7 @@ fn git_timeout(args: &[&str], cwd: &str, secs: u64) -> Result<String, String> {
                 if waited >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
+                    let _ = std::fs::remove_file(&out_path);
                     return Err(format!("git timed out after {}s — killed", secs));
                 }
                 std::thread::sleep(step);
@@ -459,11 +476,13 @@ fn git_timeout(args: &[&str], cwd: &str, secs: u64) -> Result<String, String> {
             }
         }
     }
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    let status = child.wait().map_err(|e| e.to_string())?;
+    let output = std::fs::read_to_string(&out_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&out_path);
+    if !status.success() {
+        return Err(output.trim().to_string());
     }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    Ok(output)
 }
 
 #[tauri::command]

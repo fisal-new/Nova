@@ -1,5 +1,166 @@
 # Nova IDE — Code Audit Report (v0.8.1, chronological)
 
+---
+
+# Round 20 — independent maintenance review (2026-09-19, v0.8.6)
+
+## Scope and result
+
+Static review covered the TypeScript frontend, Tauri/Rust command boundary,
+error reporting, AI web tools, package scripts, and the existing smoke tests.
+`npm run check` and `npm test` passed. This is a source review, not a claim
+that every device/Android/desktop workflow was manually exercised.
+
+## Findings requiring action
+
+### P0 — security and privacy
+
+1. **The Tauri command boundary grants unrestricted local filesystem and
+   process access.** `set_sandbox` is intentionally a no-op; all file methods
+   take absolute paths and `run_command` starts an arbitrary program with
+   arbitrary arguments. The AI exposes `read_file`, `write_file`, and
+   `run_command`, and auto-approval can skip its only UI gate. This is a valid
+   *trusted single-user desktop* product choice, but it is not a sandbox and
+   must not be described as one or shipped as safe for untrusted workspaces,
+   pasted prompts, shared machines, or multi-user installs. Restore an
+   OS-canonical workspace allowlist plus an explicit, per-command elevation
+   flow before making those claims.
+
+2. **Consent is bypassed by a report flush.** App's settings effect calls
+   `flushQueue()` regardless of whether Terms were accepted. Therefore reports
+   already stored locally can be sent during the pre-consent screen, despite
+   the surrounding comments promising the opposite. Gate *all* flush calls on
+   the accepted state, including settings changes and test sends.
+
+3. **Diagnostic reports can leak secrets and source/output data.** Only the
+   top-level error message and stack are passed through `scrub`; `extra`,
+   terminal/output/debug logs, diagnostic samples, and workspace paths are
+   copied verbatim into the queued/sent payload. API keys, tokens, `.env`
+   values, customer data, and command arguments can occur in those fields.
+   Redact every string recursively before persistence/transmission, make log
+   attachment opt-in, and display an exact preview before a report is sent.
+
+4. **Secrets are kept in browser `localStorage`.** The OpenRouter key, proxy
+   shared secret, and reporting endpoint are serialized with all settings.
+   Password input masking does not protect stored values. On a compromised
+   webview/device or script injection they are readable. Prefer the platform
+   keychain/Stronghold for native builds; keep the web demo keyless and never
+   reuse one secret as both an AI-proxy and telemetry credential.
+
+5. **The AI HTTP guard is not a complete SSRF defence.** It filters a few
+   textual private IPv4 host forms but does not resolve DNS, validate every
+   returned address, block IPv6 loopback/private/link-local ranges, or recheck
+   redirects. The browser environment reduces exploitability in some builds,
+   but this must not be relied upon for a privileged proxy. Enforce an
+   allowlist / DNS-and-connect check server-side, disable redirects, cap
+   response bytes and time, and test IPv6 plus DNS-rebinding cases.
+
+### P1 — correctness and reliability
+
+6. **`git_timeout` can deadlock on large command output.** It routes stdout
+   and stderr to pipes, then repeatedly calls `try_wait` without reading them.
+   A large `git diff`, log, error, or hook output can fill an OS pipe; Git then
+   blocks and is killed after 30 seconds. Write to capped temporary files or
+   concurrently drain both streams (as `run_command` already does), then add
+   a regression test using output larger than the pipe capacity.
+
+7. **Process timeouts do not terminate process trees.** `run_command` kills
+   only the immediate child. Shell/npm/cargo processes can leave descendants
+   running after the 120-second timeout, consuming resources or retaining
+   locks. Spawn a process group/job object and terminate the group; report
+   the exit status separately from stdout.
+
+8. **APK build logs are retained across builds.** The build opens the fixed
+   `/tmp/nova-apk-build.log` in append mode and never truncates/rotates it.
+   A later build can show the previous build's tail and detect an old APK path;
+   the log also grows without bound. Use a unique build ID and log file,
+   truncate before spawn, include the ID in poll/cancel calls, and delete old
+   logs with a retention policy.
+
+9. **Git status parsing is lossy for edge-case paths.** It parses
+   `--porcelain=v1` line-by-line and treats `line[3..]` as a single path.
+   Rename/copy records carry another NUL-separated path and quoted filenames
+   need decoding, so the UI can display/target the wrong file. Request
+   `git status --porcelain=v1 -z` and parse records as bytes (including rename
+   pairs), or use a mature parser.
+
+10. **File listings silently omit failures.** `to_entry` and its callers use
+    `ok()?` / `filter_map`, so permissions errors, invalid entries, and broken
+    symlinks disappear without a user-visible diagnostic. Return structured
+    partial-result warnings and make symlink policy explicit; this is
+    especially important if workspace containment is restored.
+
+### P2 — product and engineering debt
+
+11. **The implementation and product claims are inconsistent.** README says
+    the file API is sandboxed, while the backend explicitly disables that
+    sandbox. The audit's older entries are also marked "FIXED" even when the
+    status ledger says the protections were removed. Rewrite the README/audit
+    into a current threat model and avoid security claims that are no longer
+    true.
+
+12. **Validation is too narrow for a Tauri application.** The only JS test is
+    a single Node smoke script; it has no component/browser tests, no native
+    command integration coverage for paths/processes/git, no Android build or
+    emulator check, no accessibility checks, no dependency-security gate, and
+    no CI workflow. Add a CI matrix for `npm run check`, unit/browser tests,
+    `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, a
+    Tauri packaging smoke test, and dependency audits with a retry/mirror
+    policy.
+
+13. **The user-visible reporting copy is stale.** Settings says clearing the
+    endpoint uses a "built-in developer channel", but `effectiveEndpoint()`
+    returns an empty string and reports remain local. Change the text to
+    "queued on this device only" and add a test for the empty-endpoint path.
+
+14. **Mobile scalability is deliberately capped, not virtualized.** The tree
+    is bounded at 3,000 nodes and depth 4, search at depth 6 / 300 hits, file
+    editing at 2 MB, and diagnostics at 5,000 lines / ~200 findings. These
+    are reasonable guards, but the UI needs transparent counters, lazy
+    expansion/pagination, cancellation, and a large-file read-only mode so
+    projects do not appear silently incomplete.
+
+## Recommended delivery order
+
+1. Decide and document the threat model; if the app is anything other than a
+   single-user trusted-local tool, restore containment and default AI approval
+   to ask.
+2. Fix consent gating and report redaction before enabling telemetry by
+   default or asking users to configure an endpoint.
+3. Fix Git pipe draining, process-group cancellation, and per-build APK logs.
+4. Add native/browser/Android CI coverage, then address scalable explorer and
+   search UX.
+
+---
+
+# Round 21 — permission-path and reliability corrections (2026-09-19)
+
+## Fixed in this change
+
+- **Android runtime permission flow:** legacy READ/WRITE requests now run only
+  on Android 10 and below. Android 11+ correctly uses the special all-files
+  settings route, and that route now returns immediately when it is already
+  granted. This avoids presenting obsolete runtime requests as a solution to
+  `os error 13` on scoped-storage devices.
+- **Telemetry consent:** settings changes no longer flush queued reports until
+  the current launch has accepted the Terms gate.
+- **Report redaction:** nested strings in report metadata, paths, terminal,
+  output, debug, and diagnostic structures are redacted before queueing or
+  sending, rather than redacting only the exception message and stack.
+- **Large Git output:** internal Git calls now use a temporary output file
+  instead of unread pipes, preventing large diffs/errors from blocking until
+  the 30-second watchdog fires.
+
+## Still true on Android
+
+The native Rust backend uses filesystem paths, not Android Storage Access
+Framework (`content://`) document handles. The app workspace is usable without
+shared-storage permission. Opening arbitrary shared folders requires the user
+to enable Android's all-files access; `Android/data` and `Android/obb` remain
+blocked by Android itself. Full SAF support is a separate architectural feature
+(a Kotlin document-tree backend plus URI-aware file operations), not something
+a manifest permission can repair.
+
 External reviews received 2026-09-18/19. Every finding verified against the
 source, then fixed. Status per item below. Sections are ordered oldest→newest.
 

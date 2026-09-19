@@ -33,6 +33,16 @@ class PermissionsPlugin(private val activity: Activity) : Plugin(activity) {
 
     @Command
     fun requestLegacyStorage(invoke: Invoke) {
+        // Runtime READ/WRITE permissions only apply through Android 10. On
+        // Android 11+ they do not grant arbitrary shared-storage access;
+        // opening the all-files settings screen is the only supported raw-path
+        // route used by this std::fs based editor.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val ret = JSObject()
+            ret.put("requested", false)
+            invoke.resolve(ret)
+            return
+        }
         // Fire-and-forget on purpose: permission results are verified by the
         // frontend polling checkStorage (Verify button), so we never depend
         // on activity-callback plumbing.
@@ -51,22 +61,32 @@ class PermissionsPlugin(private val activity: Activity) : Plugin(activity) {
 
     @Command
     fun openAllFilesSettings(invoke: Invoke) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            val ret = JSObject()
+            ret.put("opened", false)
+            invoke.resolve(ret)
+            return
+        }
+        if (hasAllFilesAccess()) {
+            val ret = JSObject()
+            ret.put("opened", true)
+            invoke.resolve(ret)
+            return
+        }
         var opened = false
-        if (Build.VERSION.SDK_INT >= 30) {
+        try {
+            val intent = Intent(
+                Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                Uri.parse("package:" + activity.packageName)
+            )
+            activity.startActivity(intent)
+            opened = true
+        } catch (_: Exception) {
             try {
-                val intent = Intent(
-                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-                    Uri.parse("package:" + activity.packageName)
-                )
-                activity.startActivity(intent)
+                activity.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
                 opened = true
             } catch (_: Exception) {
-                try {
-                    activity.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
-                    opened = true
-                } catch (_: Exception) {
-                    opened = false
-                }
+                opened = false
             }
         }
         val ret = JSObject()
@@ -75,8 +95,9 @@ class PermissionsPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     private fun hasLegacyStorage(): Boolean {
-        // Real check on every SDK level (no early-true shortcut): on 30+ the
-        // answer is informational only — MANAGE_EXTERNAL_STORAGE governs.
+        // READ/WRITE are meaningful only through API 29. On API 30+ the
+        // special all-files grant is reported separately below.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) return false
         val r = ContextCompat.checkSelfPermission(activity, Manifest.permission.READ_EXTERNAL_STORAGE)
         val w = ContextCompat.checkSelfPermission(activity, Manifest.permission.WRITE_EXTERNAL_STORAGE)
         return r == PackageManager.PERMISSION_GRANTED && w == PackageManager.PERMISSION_GRANTED

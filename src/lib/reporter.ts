@@ -114,6 +114,20 @@ export function scrub(text: string): string {
     .replace(/sk-[A-Za-z0-9]{8,}/g, "[REDACTED-KEY]");
 }
 
+/** Apply secret redaction to every user-controlled string in a report.
+ * Terminal/debug output and arbitrary error metadata are just as likely to
+ * contain credentials as an exception message. */
+function scrubValue<T>(value: T): T {
+  if (typeof value === "string") return scrub(value) as T;
+  if (Array.isArray(value)) return value.map(scrubValue) as T;
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, scrubValue(item)]),
+    ) as T;
+  }
+  return value;
+}
+
 export interface StateSnapshot {
   rootPath: string;
   activePath: string;
@@ -147,7 +161,7 @@ function buildReport(
   const e = err instanceof Error ? err : new Error(String(err ?? "unknown"));
   const snap = snapshotProvider?.();
   const nav = typeof navigator !== "undefined" ? navigator : ({} as Navigator);
-  return {
+  return scrubValue<ErrorReport>({
     id: `r${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`,
     at: new Date().toISOString(),
     level,
@@ -192,7 +206,7 @@ function buildReport(
     diagnostics: snap
       ? { count: snap.diagCount, sample: snap.diagSample }
       : { count: 0, sample: [] },
-  };
+  } as ErrorReport);
 }
 
 /**

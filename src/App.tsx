@@ -45,6 +45,9 @@ export default function App() {
     setPalette, setPanel, saveActive, saveAll,
     refreshTree, refreshGit, settings, runActive, debugActive,
   } = useIDE();
+  // Gate state must be created before effects that decide whether queued
+  // diagnostics are allowed to leave the device.
+  const [accepted, setAccepted] = useState(() => termsAccepted());
 
   useEffect(() => {
     applySettingsToDom(useIDE.getState().settings);
@@ -92,8 +95,10 @@ export default function App() {
     applySettingsToDom(settings);
     setReportEndpoint(settings.errorEndpoint);
     setReportSecret(settings.appSecret);
-    void flushQueue();
-  }, [settings]);
+    // Do not transmit a queue restored from storage before the Terms gate has
+    // been accepted in this launch. The acceptance effect below owns flushing.
+    if (accepted) void flushQueue();
+  }, [settings, accepted]);
 
   // follow OS theme while "auto" is selected
   useEffect(() => {
@@ -106,9 +111,6 @@ export default function App() {
     mq.addEventListener("change", sync);
     return () => mq.removeEventListener("change", sync);
   }, []);
-
-  // terms gate state (rendered after ALL hooks below)
-  const [accepted, setAccepted] = useState(() => termsAccepted());
 
   // Error reporting hooks install only AFTER consent — nothing (not even
   // queued reports) leaves the device before the user accepts Terms.
